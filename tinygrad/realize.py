@@ -33,13 +33,18 @@ def lower_schedule_item(si:ScheduleItem) -> Optional[JITRunner]:
     if hasattr(Device[si.out.device].allocator, 'transfer') and type(Device[si.out.device]) is type(Device[si.inputs[0].device]): return BufferXfer()
     if si.inputs[0].device.startswith("DISK"): return BufferRead()
     return BufferCopy()
-  if si.ast.op is LoadOps.CUSTOM: return CustomOp(si.ast.arg)
-  if si.ast.op is LoadOps.SYNC: return SyncOp(si.out.device) if isinstance(Device[si.out.device], Compiled) else None
-  if si.ast.op is LoadOps.WAIT: return None
+  if si.ast.op is LoadOps.CUSTOM: 
+    return CustomOp(si.ast.arg)
+  if si.ast.op is LoadOps.SYNC: 
+    return SyncOp(si.out.device) if isinstance(Device[si.out.device], Compiled) else None
+  if si.ast.op is LoadOps.WAIT: 
+    return None
   return Device[si.out.device].get_runner(si.ast)
 
 logops = open(getenv("LOGOPS", ""), "a") if getenv("LOGOPS", "") else None
 def run_schedule(schedule:List[ScheduleItem]):
+  #print('\n'.join([str(x) for x in schedule]))
+  #print(' ')
   while len(schedule):
     si = schedule.pop(0)
     if logops and si.ast.op not in LoadOps: logops.write(str(si.ast)+"\n")
@@ -65,6 +70,7 @@ def run_schedule(schedule:List[ScheduleItem]):
     # run the function (put it in JIT)
     real_buffers = [x.realized for x in (si.out,)+si.inputs if x.size != 0]
     assert all(x is not None for x in real_buffers), f"can't run, some inputs aren't realized {real_buffers}"
-    if prg: prg.exec(cast(List[Buffer], real_buffers), si.var_vals)
+    if prg: 
+      prg.exec(cast(List[Buffer], real_buffers), si.var_vals)
     elif si.out.size > 0: update_stats(colored(f"empty {si.out.st.size:10d} {si.out.dtype}", "yellow"), 0, 0, {}, None, 1, device=si.out.device)
     if GRAPH: realized_lazybuffer(si.out, GlobalCounters.kernel_count)

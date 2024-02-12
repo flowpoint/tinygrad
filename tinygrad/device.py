@@ -264,11 +264,21 @@ def _get_interpreted_fxn(fxn_for_op:Dict[Op, Callable], ast:LazyOp) -> Interpret
 
 class Compiler:
   linearizer_opts: ClassVar[LinearizerOptions]
-  def __init__(self, cachekey:Optional[str]=None): self.cachekey = None if getenv("DISABLE_COMPILER_CACHE") else cachekey
+  def __init__(self, cachekey:Optional[str]=None): 
+    #if cachekey is not None:
+    #print(cachekey)
+    self.cachekey = None if getenv("DISABLE_COMPILER_CACHE") else cachekey
   def render(self, name:str, uops) -> str: raise NotImplementedError("need a render function")
   def compile(self, src:str) -> bytes: raise NotImplementedError("need a compile function")
   def compile_cached(self, src:str) -> bytes:
+    #print('hit cache')
+    st = time.perf_counter_ns()
+    incache = diskcache_get(self.cachekey, src)
+    tt = st - time.perf_counter_ns()
+    #print(st)
     if self.cachekey is None or (lib := diskcache_get(self.cachekey, src)) is None:
+      #raise RuntimeError('compile cached called, lol')
+      #print('compile_called')
       lib = self.compile(src)
       if self.cachekey is not None: diskcache_put(self.cachekey, src, lib)
     return lib
@@ -281,7 +291,24 @@ class CompiledASTRunner(JITRunner):
     if local_size is not None: local_size = local_size + [1]*(3-len(local_size))
     self.name, self.display_name, self.prg, self.device, self.global_size, self.local_size, self.first_run = \
       to_function_name(name), name, prg, device, global_size, local_size, True
-    lib:bytes = precompiled if precompiled is not None else self.device.compiler.compile_cached(prg)
+
+    compiler = self.device.compiler
+    lib: bytes
+
+    if compiler.cachekey is None or (lib := diskcache_get(compiler.cachekey, prg)) is None:
+      lib = compiler.compile(prg)
+      if compiler.cachekey is not None: diskcache_put(compiler.cachekey, prg, lib)
+
+    '''
+    if precompiled is not None:
+      #raise RuntimeError('precompiled used')
+      #print(lib == precompiled)
+      lib = precompiled
+    '''
+
+    #lib:bytes = precompiled if precompiled is not None else self.device.compiler.compile_cached(prg)
+
+    #print(self.name)
     self.lib, self.clprg = lib, self.device.runtime(self.name, lib)
     self.vars: List[Variable] = []
     if ast:
@@ -311,6 +338,8 @@ class CompiledASTRunner(JITRunner):
     self.first_run = False
     return et
 
+from more_itertools import flatten
+
 class Compiled:
   def __init__(self, device:str, allocator:Allocator, compiler:Compiler, runtime, graph=None):
     self.dname, self.allocator, self.compiler, self.runtime, self.graph = device, allocator, compiler, runtime, graph
@@ -328,21 +357,36 @@ class Compiled:
     k = Linearizer(ast, self.compiler.linearizer_opts)
     k.required_optimizations()
     if not NOOPT:
-      if not (used_tensor_cores:=k.apply_tensor_cores(getenv("TC", 1))): k.hand_coded_optimizations()
+      #if not (used_tensor_cores:=k.apply_tensor_cores(getenv("TC", 1))): k.hand_coded_optimizations()
+      k.hand_coded_optimizations()
       if BEAM >= 1:
-        lins = [(("tc" if used_tensor_cores else "hc"), k)]
+        #lins = [(("tc" if used_tensor_cores else "hc"), k)]
+        lins = []
+        '''
         if used_tensor_cores:
           lins.append(("hc", Linearizer(ast, self.compiler.linearizer_opts)))
           lins[-1][1].hand_coded_optimizations()
+        '''
         kb = Linearizer(ast, self.compiler.linearizer_opts)
         kb.required_optimizations()
         from tinygrad.features.search import beam_search, time_linearizer, bufs_from_lin
         test_rawbuffers = bufs_from_lin(kb)    # allocate scratch buffers for optimization
-        lins.append((f"beam{BEAM.value}", beam_search(kb, test_rawbuffers, BEAM.value, bool(getenv("BEAM_ESTIMATE", 1)))))
-        timed = sorted([(nm, tk, time_linearizer(tk, test_rawbuffers, allow_test_size=False, clear_l2=True)) for nm, tk in lins], key=lambda x: x[2])
-        if DEBUG >= 1: print("  <  ".join(f"{nm:6s} : {lin.colored_shape(30, dense=True)} : {tm*1e6:8.2f} us" for nm, lin, tm in timed))
-        k = timed[0][1]
+        lins.extend(beam_search(kb, test_rawbuffers, BEAM.value, bool(getenv("BEAM_ESTIMATE", 1))))
+        print(lins)
+        #print('ste')
+        #print(lins)
+        #timed = sorted(lins, key=lambda x: x[1][1])
+        #timed = lins
+        #timed = sorted([(nm, tk, time_linearizer(tk, test_rawbuffers, allow_test_size=False, clear_l2=True)) for nm, tk in lins], key=lambda x: x[2])
+        timed = sorted([(nm, tk) for (nm, tk) in lins], key=lambda x: x[1])
+        #timed = reversed(sorted([(nm, tk) for (nm, tk) in lins], key=lambda x: x[1]))
+        #if DEBUG >= 1: print("  <  ".join(f"{nm:6s} : {lin.colored_shape(30, dense=True)} : {tm*1e6:8.2f} us" for nm, lin, tm in timed))
+        k = list(timed)[0][0]
+        #k = lins[1][1]
+        #print(flatten(lins))#(k[0])
+        #k = timed[1][1]
     return k
 
   @functools.lru_cache(None)    # pylint: disable=method-cache-max-size-none
-  def get_runner(self, ast:LazyOp) -> CompiledASTRunner: return self.to_program(self.get_linearizer(ast))
+  def get_runner(self, ast:LazyOp) -> CompiledASTRunner: 
+    return self.to_program(self.get_linearizer(ast))
